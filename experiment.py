@@ -26,10 +26,10 @@ class experiment():
     def __init__(self, fixed_model_params=None, n=None, p=None, T=None, X = None, y = None, cond_exp=None, noise_sd_fn=None, x_dist=None, 
                  S=25, random_state=42, var_name = 'min_samples_leaf', var_list = [1,5], metric='interval_score_loss',
                  fast_uacqr=True, B=100, model_type='rfqr', uacqrs_agg='std', empirical_data_fraction=0.01,
-                 oracle_g=None, oracle_t=None, randomized_conformal=False, 
+                 oracle_g=None, oracle_t=None, inject_noise=False, randomized_conformal=False, 
                  extraneous_quantiles=[0.1, 0.25, 0.4, 0.5, 0.6, 0.75,0.9], 
                  uacqrs_bagging=False, sorting_column=0, max_normalization=False,
-                 local_metric=False, file_name=None):
+                 local_metric=False, oqr_metrics=False, file_name=None):
         
         self.var_name = var_name
         self.metric = metric
@@ -57,7 +57,10 @@ class experiment():
                                    'median_average_length_test', 'uacqrp_test_len_std', 
                                    'cqr_test_len_std', 'median_test_len_std', 'uacqrp_interval_score_loss', 'cqr_interval_score_loss', 
                                    'uacqrs_interval_score_loss', 'cqrr_interval_score_loss','median_interval_score_loss',
-                                   'base_average_length_test','base_test_coverage','cqrr_test_coverage',var_name]
+                                   'base_average_length_test','base_test_coverage','cqrr_test_coverage',
+                                   'base_oqr_corr', 'uacqrp_oqr_corr','uacqrs_oqr_corr','cqr_oqr_corr','cqrr_oqr_corr',
+                                   'base_oqr_hsic', 'uacqrp_oqr_hsic','uacqrs_oqr_hsic','cqr_oqr_hsic','cqrr_oqr_hsic',
+                                   'base_oqr_wsc', 'uacqrp_oqr_wsc','uacqrs_oqr_wsc','cqr_oqr_wsc','cqrr_oqr_wsc',var_name]
         
 
         df = pd.DataFrame(columns=col_names)
@@ -98,8 +101,11 @@ class experiment():
                                 oracle_g=oracle_g, randomized_conformal=randomized_conformal, extraneous_quantiles=extraneous_quantiles,
                                 uacqrs_bagging=uacqrs_bagging)
                 uacqr_results.fit(x_train, y_train)
-                uacqr_results.calibrate(x_calib, y_calib)
-                uacqr_results.evaluate(x_test, y_test)
+                if oracle_g:
+                    uacqr_results.calibrate(x_calib, y_calib, inject_noise=inject_noise, cond_exp=cond_exp, noise_sd_fn=noise_sd_fn)
+                else:
+                    uacqr_results.calibrate(x_calib, y_calib, inject_noise=inject_noise)
+                uacqr_results.evaluate(x_test, y_test, oqr_metrics=oqr_metrics)
 
 
                 if self.local_metric:
@@ -213,7 +219,7 @@ class experiment():
         return x_train,y_train,x_calib,y_calib,x_test,y_test
 
     def plot(self, metric='average_length_test', title_prefix=None, log_x=False, log_y=False, calc_only=False, 
-             xlabel_conditional_coverage = "$X$", custom_title=None, ax=None, bigger_font=None):
+             xlabel_conditional_coverage = "$X$", custom_title=None, ax=None, bigger_font=None, xlabel=None, ylabel=None):
         
         if self.local_metric:
             self.var_name = self.sorting_column
@@ -273,13 +279,20 @@ class experiment():
 
         if self.local_metric:
             if metric == 'conditional_coverage':
-                ax.axhline(y = 0.9, color = 'tab:blue', linestyle='--', zorder=0) 
+                ax.axhline(y = 0.9, color = 'tab:blue', linestyle='--', zorder=0)
+                ax.set_ylabel('Conditional Coverage')
+
             
             ax.fill_between(sem_results.index, mean_results['Base Estimator'] - 1.96 * sem_results['Base Estimator'],
                 mean_results['Base Estimator'] + 1.96 * sem_results['Base Estimator'],
                 color = 'tab:purple', alpha = .1)
             ax.set_xlabel(self.var_name)
             
+        if xlabel:
+            ax.set_xlabel(xlabel)
+            
+        if ylabel:
+            ax.sex_ylabel(ylabel)
 
 
         if log_x:

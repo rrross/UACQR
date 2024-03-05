@@ -20,7 +20,7 @@ from lightgbm import LGBMRegressor
 from scipy.spatial.distance import cdist
 
 from helper import generate_data, interval_score_loss, randomized_conformal_cutoffs, select_column_per_row, average_coverage, average_interval_width
-from helper import sample_binning_model, QuantileBandwidthModel, QuantileRegressionNN
+from helper import sample_binning_model, QuantileBandwidthModel, QuantileRegressionNN, corr_coverage_widths, hsic_coverage_widths, wsc
 
 
 
@@ -71,7 +71,7 @@ class uacqr():
             q_lower = q_lower * 100
             q_upper = q_upper * 100
 
-        self.model_params = model_params
+        self.model_params = model_params.copy()
         self.B = B
         self.q_lower = q_lower
         self.q_upper = q_upper
@@ -100,11 +100,12 @@ class uacqr():
         if not(self.bootstrapping_for_uacqrp) and (self.model_type not in ['rfqr','neural_net']):
             raise Exception("Cannot use Fast UACQR for models other than RFQR and Neural Net")
 
+        self.uacqrp_model_params = self.model_params.copy()
         if not self.bootstrapping_for_uacqrp and (self.model_type=='rfqr'):
-            self.model_params["n_estimators"] = 1
+            self.uacqrp_model_params["n_estimators"] = 1
 
             if not(self.double_bootstrapping):
-                self.model_params["bootstrap"] = False
+                self.uacqrp_model_params["bootstrap"] = False
 
         self.models_B = []
         for b in range(self.B):
@@ -121,22 +122,22 @@ class uacqr():
             if self.model_type=='rfqr':
                 if self.sample_rfqr:
                     model_b = SampleRandomForestQuantileRegressor(q=[self.q_lower/100, self.q_upper/100], random_state=self.random_state+b, 
-                                                        n_jobs=-1, **self.model_params)
+                                                        n_jobs=-1, **self.uacqrp_model_params)
                 else:
                     model_b = RandomForestQuantileRegressor(q=[self.q_lower/100, self.q_upper/100], random_state=self.random_state+b, 
-                                                        n_jobs=-1, **self.model_params)
+                                                        n_jobs=-1, **self.uacqrp_model_params)
                 model_b.fit(x_train_b, y_train_b)
             elif self.model_type=='linear':
-                model_b_lower = QuantileRegressor(quantile = self.q_lower/100, **self.model_params)
-                model_b_upper = QuantileRegressor(quantile = self.q_upper/100, **self.model_params)
+                model_b_lower = QuantileRegressor(quantile = self.q_lower/100, **self.uacqrp_model_params)
+                model_b_upper = QuantileRegressor(quantile = self.q_upper/100, **self.uacqrp_model_params)
                 model_b_lower.fit(x_train_b, y_train_b)
                 model_b_upper.fit(x_train_b, y_train_b)
                 model_b = [model_b_lower, model_b_upper]
             elif self.model_type=='lightgbm':
                 model_b_lower = LGBMRegressor(objective='quantile', metric='quantile', boosting_type='gbdt',
-                                            alpha=self.q_lower/100, n_jobs=-1, random_state=self.random_state+b, **self.model_params)
+                                            alpha=self.q_lower/100, n_jobs=-1, random_state=self.random_state+b, **self.uacqrp_model_params)
                 model_b_upper = LGBMRegressor(objective='quantile', metric='quantile', boosting_type='gbdt',
-                                            alpha=self.q_upper/100, n_jobs=-1, random_state=self.random_state+b, **self.model_params)
+                                            alpha=self.q_upper/100, n_jobs=-1, random_state=self.random_state+b, **self.uacqrp_model_params)
                 model_b_lower.fit(x_train_b, y_train_b)
                 model_b_upper.fit(x_train_b, y_train_b)
                 model_b = [model_b_lower, model_b_upper]
@@ -145,10 +146,10 @@ class uacqr():
 
                 model_b.fit(x_train_b, y_train_b)
             elif self.model_type == 'bandwidth':
-                model_b = QuantileBandwidthModel(quantiles=[self.q_lower/100, self.q_upper/100], **self.model_params)
+                model_b = QuantileBandwidthModel(quantiles=[self.q_lower/100, self.q_upper/100], **self.uacqrp_model_params)
                 model_b.fit(x_train_b, y_train_b)
             elif self.model_type == 'knn':
-                model_b = KNeighborsQuantileRegressor(q=[self.q_lower/100, self.q_upper/100], **self.model_params)
+                model_b = KNeighborsQuantileRegressor(q=[self.q_lower/100, self.q_upper/100], **self.uacqrp_model_params)
                 model_b.fit(x_train_b, y_train_b)
             elif (self.model_type == 'neural_net') and self.bootstrapping_for_uacqrp:
                 self.modeled_quantiles = self.extraneous_quantiles.copy()
@@ -156,7 +157,7 @@ class uacqr():
                 self.modeled_quantiles.append(self.self.q_upper/100)
                 
                 model_b = QuantileRegressionNN(quantiles=self.modeled_quantiles, 
-                                                random_state=self.random_state+b, **self.model_params)
+                                                random_state=self.random_state+b, **self.uacqrp_model_params)
                 model_b.fit(x_train_b, y_train_b)
             elif self.model_type =='neural_net' and not(self.bootstrapping_for_uacqrp):
                 break
@@ -195,7 +196,7 @@ class uacqr():
                 print("model not implemented yet for non-median cqr")
 
 
-    def calibrate(self, x_calib, y_calib):
+    def calibrate(self, x_calib, y_calib, inject_noise=False, cond_exp=False, noise_sd_fn=False):
         n1 = x_calib.shape[0]
         
         calib_sorted_q_lower_ests = self.__predict_B_sorted(x_calib, lower = True)
@@ -223,8 +224,36 @@ class uacqr():
         uacqrs_spread_lower = calib_sorted_q_lower_ests_df.iloc[:,:-2].agg(self.uacqrs_agg, axis=1)
 
         if self.oracle_g:
-            uacqrs_spread_upper = self.oracle_g(x_calib)
-            uacqrs_spread_lower = self.oracle_g(x_calib)
+            cqr_model_lower_calib = self.cqr_base_model.predict(x_calib)[0]
+            cqr_model_upper_calib = self.cqr_base_model.predict(x_calib)[-1]
+
+            true_quantile_lower = cond_exp(x_calib) - norm.ppf(self.q_upper/100, 0, noise_sd_fn(x_calib))
+            true_quantile_upper = cond_exp(x_calib) + norm.ppf(self.q_upper/100, 0, noise_sd_fn(x_calib))
+
+            uacqrs_spread_lower = np.abs(cqr_model_lower_calib - true_quantile_lower)
+            uacqrs_spread_upper = np.abs(cqr_model_upper_calib - true_quantile_upper)
+
+            self.cond_exp = cond_exp
+            self.noise_sd_fn = noise_sd_fn
+        
+        if inject_noise:
+            noise_upper_variance = calib_sorted_q_upper_ests_df.iloc[:,:-2].agg(self.uacqrs_agg, axis=1).var() * inject_noise
+            noise_lower_variance = calib_sorted_q_lower_ests_df.iloc[:,:-2].agg(self.uacqrs_agg, axis=1).var() * inject_noise
+
+            noise_upper = np.random.normal(size=calib_sorted_q_upper_ests_df.shape[0], scale=noise_upper_variance**0.5)
+            noise_lower = np.random.normal(size=calib_sorted_q_lower_ests_df.shape[0], scale=noise_lower_variance**0.5)
+
+            uacqrs_spread_upper = uacqrs_spread_upper + noise_upper
+            uacqrs_spread_lower = uacqrs_spread_lower + noise_lower
+                
+            uacqrs_spread_upper.loc[uacqrs_spread_upper<0] = 0
+            uacqrs_spread_lower.loc[uacqrs_spread_lower<0] = 0
+
+        self.inject_noise = inject_noise
+
+
+
+            
 
         if self.uacqrs_bagging:
             uacqrs_scores_upper = self.transform(calib_sorted_q_upper_ests_df['truth']) - self.transform(calib_sorted_q_upper_ests_df[int(self.B/2)])
@@ -259,10 +288,10 @@ class uacqr():
         self.uacqrs_scores = uacqrs_scores
         self.cqrr_scores = cqrr_scores
 
-        self.score_threshold = scores["combined"].sort_values(ascending=True).iloc[math.ceil((1-self.alpha)*(n1+1))]
-        self.cqr_score_threshold = cqr_scores["combined"].sort_values(ascending=True).iloc[math.ceil((1-self.alpha)*(n1+1))]
-        self.uacqrs_score_threshold = uacqrs_scores["combined"].sort_values(ascending=True).iloc[math.ceil((1-self.alpha)*(n1+1))]
-        self.cqrr_score_threshold = cqrr_scores["combined"].sort_values(ascending=True).iloc[math.ceil((1-self.alpha)*(n1+1))]
+        self.score_threshold = scores["combined"].sort_values(ascending=True).iloc[math.ceil((1-self.alpha)*(n1+1))-1]
+        self.cqr_score_threshold = cqr_scores["combined"].sort_values(ascending=True).iloc[math.ceil((1-self.alpha)*(n1+1))-1]
+        self.uacqrs_score_threshold = uacqrs_scores["combined"].sort_values(ascending=True).iloc[math.ceil((1-self.alpha)*(n1+1))-1]
+        self.cqrr_score_threshold = cqrr_scores["combined"].sort_values(ascending=True).iloc[math.ceil((1-self.alpha)*(n1+1))-1]
 
         if self.randomized_conformal:
             print("Warning: score threshold attributes at this point are not randomized. They will be after making predictions")
@@ -286,8 +315,28 @@ class uacqr():
         uacqrs_spread_lower_test = pd.DataFrame(q_lower_uacqrp).iloc[:,:-1].agg(self.uacqrs_agg, axis=1)
 
         if self.oracle_g:
-            uacqrs_spread_upper_test = pd.Series(self.oracle_g(x_test))
-            uacqrs_spread_lower_test = pd.Series(self.oracle_g(x_test))
+            cqr_model_lower = self.cqr_base_model.predict(x_test)[0]
+            cqr_model_upper = self.cqr_base_model.predict(x_test)[-1]
+
+            true_quantile_lower = self.cond_exp(x_test) - norm.ppf(self.q_upper/100, 0, self.noise_sd_fn(x_test))
+            true_quantile_upper = self.cond_exp(x_test) + norm.ppf(self.q_upper/100, 0, self.noise_sd_fn(x_test))
+
+            uacqrs_spread_lower_test = pd.Series(np.abs(cqr_model_lower - true_quantile_lower))
+            uacqrs_spread_upper_test = pd.Series(np.abs(cqr_model_upper - true_quantile_upper))
+
+        if self.inject_noise:
+            noise_upper_variance = uacqrs_spread_upper_test.var() * self.inject_noise
+            noise_lower_variance = uacqrs_spread_lower_test.var() * self.inject_noise
+
+            noise_upper = np.random.normal(size=uacqrs_spread_upper_test.shape[0], scale=noise_upper_variance**0.5)
+            noise_lower = np.random.normal(size=uacqrs_spread_lower_test.shape[0], scale=noise_lower_variance**0.5)
+
+            uacqrs_spread_upper_test = uacqrs_spread_upper_test + noise_upper
+            uacqrs_spread_lower_test = uacqrs_spread_lower_test + noise_lower
+                
+            uacqrs_spread_upper_test.loc[uacqrs_spread_upper_test<0] = 0
+            uacqrs_spread_lower_test.loc[uacqrs_spread_lower_test<0] = 0
+
 
         if self.bootstrapping_for_uacqrp:
             cqr_model_lower = q_lower_uacqrp[:,int(self.B/2)]
@@ -322,7 +371,7 @@ class uacqr():
 
         return bounds_df
 
-    def evaluate(self, x_test, y_test): 
+    def evaluate(self, x_test, y_test, oqr_metrics=False): 
         
         self.x_test = x_test
         self.y_test = y_test
@@ -340,6 +389,15 @@ class uacqr():
         metrics["average_length_test"] = {method: average_interval_width(bounds_df[method]["upper"].values, bounds_df[method]["lower"].values) 
                                           for method in methods}
         
+        if oqr_metrics:
+            metrics["oqr_corr"] = {method: corr_coverage_widths(bounds_df[method]["upper"].values, bounds_df[method]["lower"].values, 
+                                                                      y_test) for method in methods}
+            metrics["oqr_hsic"] = {method: hsic_coverage_widths(bounds_df[method]["upper"].values, bounds_df[method]["lower"].values, 
+                                                                      y_test) for method in methods}
+            
+            metrics["oqr_wsc"] = {method: wsc(x_test, y_test, bounds_df[method]["upper"].values, bounds_df[method]["lower"].values) 
+                                          for method in methods}
+
         for outer_key, inner_dict in metrics.items():
             for inner_key, inner_value in inner_dict.items():
                 setattr(self, f"{inner_key.replace('-','').lower()}_{outer_key}", inner_value)
