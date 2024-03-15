@@ -1,5 +1,5 @@
 # Uncertainty Aware Conformalized Quantile Regression (UACQR)
-Here we provide an implementation of UACQR and notebooks to reproduce the figures and tables from "Integrating Uncertainty Awareness into Conformalized Quantile Regression."
+Here we provide an implementation of UACQR and notebooks to reproduce the figures and tables from ["Integrating Uncertainty Awareness into Conformalized Quantile Regression"](https://arxiv.org/abs/2306.08693)
 
 We demonstrate how to use our method for neural networks and Quantile Regression Forests in the two demo notebooks.  
 
