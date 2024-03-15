@@ -18,10 +18,11 @@ import copy
 from scipy.special import expit, logit
 from lightgbm import LGBMRegressor
 from scipy.spatial.distance import cdist
+from catboost import CatBoostRegressor
 
 from helper import generate_data, interval_score_loss, randomized_conformal_cutoffs, select_column_per_row, average_coverage, average_interval_width
 from helper import sample_binning_model, QuantileBandwidthModel, QuantileRegressionNN, corr_coverage_widths, hsic_coverage_widths, wsc
-
+from helper import CatBoostWrapper
 
 
 
@@ -39,7 +40,7 @@ class uacqr():
         q_lower (float): target lower conditional quantile for quantile regression. Between 0 and 100. Default is 5
         q_upper (float): target upper conditional quantile for quantile regression. Between 0 and 100. Default is 95 
         alpha (float): target miscoverage rate, between 0 and 1
-        model_type (str): type of model for quantile regression. Options: neural_net, rfqr, linear, lightgbm, knn
+        model_type (str): type of model for quantile regression. Options: neural_net, rfqr, linear, lightgbm, knn, catboost
         random_state (int): random state for bootstrapping data and passed to model
         uacqrs_agg (str): either 'std' for standard deviation or 'iqr' for Innerquartile Range
         randomized_conformal (bool): use randomized conformal cutoffs to ensure exact 90% coverage
@@ -97,8 +98,8 @@ class uacqr():
         self.x_train = x_train
         self.y_train = y_train
 
-        if not(self.bootstrapping_for_uacqrp) and (self.model_type not in ['rfqr','neural_net']):
-            raise Exception("Cannot use Fast UACQR for models other than RFQR and Neural Net")
+        if not(self.bootstrapping_for_uacqrp) and (self.model_type not in ['rfqr','neural_net', 'catboost']):
+            raise Exception("Cannot use Fast UACQR for models other than RFQR, CatBoost, and Neural Net")
 
         self.uacqrp_model_params = self.model_params.copy()
         if not self.bootstrapping_for_uacqrp and (self.model_type=='rfqr'):
@@ -165,6 +166,10 @@ class uacqr():
                 model_b = LinearRegression(n_jobs=-1)
                 model_b.fit(x_train_b, y_train_b)
                 self.sigmahat = np.mean(np.square(model_b.predict(self,x_train)-self.y_train))**0.5
+            elif self.model_type =='catboost' and self.bootstrapping_for_uacqrp:
+                print("Not implemented yet to use boostrapping_for_uacqrp=True with CatBoost")
+            elif self.model_type =='catboost' and not(self.bootstrapping_for_uacqrp):
+                break
 
             
             self.models_B.append(model_b)
@@ -180,6 +185,25 @@ class uacqr():
 
             self.nn_model = nn_model
 
+        if (self.model_type == 'catboost') and not(self.bootstrapping_for_uacqrp):
+            catboost_model_lower = CatBoostRegressor(loss_function=f'Quantile:alpha={self.q_lower/100}', random_state=self.random_state, 
+                                                     verbose=False, **self.model_params)
+            catboost_model_upper = CatBoostRegressor(loss_function=f'Quantile:alpha={self.q_upper/100}', random_state=self.random_state,
+                                                     verbose=False, **self.model_params)
+
+            catboost_model_lower.fit(x_train, y_train)
+            catboost_model_upper.fit(x_train, y_train)
+
+            self.catboost_model = [catboost_model_lower, catboost_model_upper]
+
+            if self.B != catboost_model_lower.tree_count_:
+                print("B != number of boosting rounds. Overriding to B = number of boosting rounds")
+                self.B = min(catboost_model_lower.tree_count_, catboost_model_upper.tree_count_)
+                
+            if catboost_model_lower.tree_count_ != catboost_model_upper.tree_count_:
+                print("Different number of boosting rounds for upper and lower quantile regressors. Overriding B to be the minimum of the two")
+
+            self.models_B = [CatBoostWrapper(self.catboost_model, t) for t in range(self.B)]
 
         if not(self.bootstrapping_for_uacqrp):
             if self.model_type=='rfqr':
@@ -192,6 +216,8 @@ class uacqr():
                 self.cqr_base_model.fit(x_train, y_train)
             elif self.model_type=='neural_net':
                 self.cqr_base_model = self.nn_model
+            elif self.model_type == 'catboost':
+                self.cqr_base_model = CatBoostWrapper(self.catboost_model)
             else:
                 print("model not implemented yet for non-median cqr")
 
@@ -622,6 +648,8 @@ class uacqr():
         else:
             i = -1
         if self.model_type=='rfqr':
+            return model.predict(x_calib)[i]
+        elif self.model_type=='catboost':
             return model.predict(x_calib)[i]
         elif self.model_type=='linear':
             return model[i].predict(x_calib)

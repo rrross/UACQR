@@ -173,6 +173,19 @@ class QuantileBandwidthModel:
         y_pred = np.array(y_pred)
         return [y_pred[:,c] for c in range(y_pred.shape[1])]
 
+class CatBoostWrapper:
+    def __init__(self, model, t=None):
+        self.lower_model = model[0]
+        self.upper_model = model[1]
+        if t is None:
+            self.t = model[0].tree_count_ - 1
+        else:
+            self.t = t
+    
+    def predict(self, X_test):
+        return self.lower_model.predict(X_test, ntree_end=self.t+1), self.upper_model.predict(X_test, ntree_end=self.t+1)
+        
+
 
 class QuantileRegressionNet(nn.Module):
     def __init__(self, input_size, output_size, hidden_size=100, dropout=False, batch_norm=False):
